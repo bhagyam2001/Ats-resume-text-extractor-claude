@@ -10,7 +10,7 @@ import datetime
 import pdfplumber
 import docx2txt
 
-
+##ATS WORKFLOW
 #claude generated code for ats
 # ═════════════════════════════════════════════════════════════
 # SKILLS DICTIONARY — TECH + NON-TECH + MIXED

@@ -4,7 +4,7 @@ import base64
 import io
 import re
 import logging
-###import requests
+import requests
 import datetime
 
 import pdfplumber

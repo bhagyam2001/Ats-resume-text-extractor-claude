@@ -11,7 +11,7 @@ import pdfplumber
 import docx2txt
 
 
-
+#claude generated code for ats
 # ═════════════════════════════════════════════════════════════
 # SKILLS DICTIONARY — TECH + NON-TECH + MIXED
 # Covers: Engineering, HR, Finance, Operations, Management,

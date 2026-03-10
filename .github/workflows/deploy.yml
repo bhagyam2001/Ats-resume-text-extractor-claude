@@ -1,87 +1,39 @@
-name: Deploy ATS Resume Extractor to Azure Functions
+name: Deploy Python Function
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
+
+env:
+  AZURE_FUNCTIONAPP_NAME: ats-resume-extractor
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
+  PYTHON_VERSION: '3.11'
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
 
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt --target=".python_packages/lib/site-packages"
 
-      - name: Install packages into bundle folder
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install \
-            pdfplumber==0.11.4 \
-            docx2txt==0.8 \
-            requests==2.32.3 \
-            pytesseract==0.3.10 \
-            Pillow==10.4.0 \
-            azure-functions==1.21.3 \
-            --target extractresume/.python_packages/lib/site-packages
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Login to Azure
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Set WEBSITE_RUN_FROM_PACKAGE to 0
-        run: |
-          az functionapp config appsettings set \
-            --name ats-resume-extractor \
-            --resource-group ats-system-rg \
-            --settings WEBSITE_RUN_FROM_PACKAGE=0 \
-            SCM_DO_BUILD_DURING_DEPLOYMENT=false
-
-      - name: Zip and deploy via blob storage
-        run: |
-          zip -r deploy.zip . \
-            --exclude "*.git*" \
-            --exclude "*.pyc" \
-            --exclude "__pycache__/*"
-
-          az storage blob upload \
-            --account-name atsresumestorage \
-            --container-name deploy \
-            --name deploy.zip \
-            --file deploy.zip \
-            --overwrite \
-            --auth-mode login
-
-          EXPIRY=$(date -u -d '+1 year' '+%Y-%m-%dT%H:%MZ')
-          SAS_URL=$(az storage blob generate-sas \
-            --account-name atsresumestorage \
-            --container-name deploy \
-            --name deploy.zip \
-            --permissions r \
-            --expiry $EXPIRY \
-            --auth-mode login \
-            --full-uri \
-            --output tsv)
-
-          az functionapp config appsettings set \
-            --name ats-resume-extractor \
-            --resource-group ats-system-rg \
-            --settings WEBSITE_RUN_FROM_PACKAGE="$SAS_URL"
-
-          az functionapp restart \
-            --name ats-resume-extractor \
-            --resource-group ats-system-rg
-      - name: Restart Function App
-        run: |
-          az functionapp restart \
-            --name ats-resume-extractor \
-            --resource-group ats-system-rg
-          echo "✅ Deployed successfully!"
+    - name: Deploy to Azure Function
+      uses: Azure/functions-action@v1
+      with:
+        app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+        package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}

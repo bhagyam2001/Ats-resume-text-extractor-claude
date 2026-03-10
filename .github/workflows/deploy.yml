@@ -51,12 +51,25 @@ jobs:
             --exclude "*.git*" \
             --exclude "*.pyc" \
             --exclude "__pycache__/*"
-          az functionapp deploy \
+          
+          # Get publishing credentials
+          CREDS=$(az functionapp deployment list-publishing-credentials \
             --name ats-resume-extractor \
             --resource-group ats-system-rg \
-            --src-path deploy.zip \
-            --type zip \
-            --async true
+            --query '{u:publishingUserName,p:publishingPassword}' \
+            -o json)
+          
+          PUB_USER=$(echo $CREDS | python3 -c "import sys,json; print(json.load(sys.stdin)['u'])")
+          PUB_PASS=$(echo $CREDS | python3 -c "import sys,json; print(json.load(sys.stdin)['p'])")
+          
+          # Deploy via Kudu zip API
+          curl -X POST \
+            "https://ats-resume-extractor.scm.azurewebsites.net/api/zipdeploy?isAsync=false" \
+            -u "$PUB_USER:$PUB_PASS" \
+            -H "Content-Type: application/zip" \
+            --data-binary @deploy.zip \
+            --max-time 300 \
+            -w "\nHTTP Status: %{http_code}\n"
 
       - name: Restart Function App
         run: |

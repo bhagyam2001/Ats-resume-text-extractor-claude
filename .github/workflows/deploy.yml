@@ -1,0 +1,48 @@
+name: Deploy ATS Resume Extractor to Azure Functions
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # Step 1 — Get the code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2 — Set up Python 3.11 on the GitHub runner machine
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Step 3 — Install ALL libraries into extractresume/.python_packages
+      # Azure Functions automatically looks in this exact folder for packages
+      # This means Azure never needs to run pip itself
+      - name: Install packages into bundle folder
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            pdfplumber==0.11.4 \
+            docx2txt==0.8 \
+            requests==2.32.3 \
+            pytesseract==0.3.10 \
+            Pillow==10.4.0 \
+            azure-functions==1.21.3 \
+            --target extractresume/.python_packages/lib/site-packages
+
+      # Step 4 — Deploy everything to Azure including the packages folder
+      - name: Deploy to Azure Function App
+        uses: Azure/functions-action@v1
+        with:
+          app-name: 'ats-resume-extractor'
+          package: '.'
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          scm-do-build-during-deployment: false
+          enable-oryx-build: false

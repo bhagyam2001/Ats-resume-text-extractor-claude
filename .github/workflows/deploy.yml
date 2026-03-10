@@ -51,10 +51,12 @@ jobs:
             --exclude "*.git*" \
             --exclude "*.pyc" \
             --exclude "__pycache__/*"
-          az functionapp deployment source config-zip \
+          az functionapp deploy \
             --name ats-resume-extractor \
             --resource-group ats-system-rg \
-            --src deploy.zip
+            --src-path deploy.zip \
+            --type zip \
+            --async true
 
       - name: Restart Function App
         run: |

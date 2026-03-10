@@ -12,19 +12,14 @@ jobs:
 
     steps:
 
-      # Step 1 — Get the code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2 — Set up Python 3.11 on the GitHub runner machine
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # Step 3 — Install ALL libraries into extractresume/.python_packages
-      # Azure Functions automatically looks in this exact folder for packages
-      # This means Azure never needs to run pip itself
       - name: Install packages into bundle folder
         run: |
           python -m pip install --upgrade pip
@@ -37,12 +32,33 @@ jobs:
             azure-functions==1.21.3 \
             --target extractresume/.python_packages/lib/site-packages
 
-      # Step 4 — Deploy everything to Azure including the packages folder
-      - name: Deploy to Azure Function App
-        uses: Azure/functions-action@v1
+      - name: Login to Azure
+        uses: azure/login@v1
         with:
-          app-name: 'ats-resume-extractor'
-          package: '.'
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
-          scm-do-build-during-deployment: false
-          enable-oryx-build: false
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set WEBSITE_RUN_FROM_PACKAGE to 0
+        run: |
+          az functionapp config appsettings set \
+            --name ats-resume-extractor \
+            --resource-group ats-system-rg \
+            --settings WEBSITE_RUN_FROM_PACKAGE=0 \
+            SCM_DO_BUILD_DURING_DEPLOYMENT=false
+
+      - name: Zip and deploy
+        run: |
+          zip -r deploy.zip . \
+            --exclude "*.git*" \
+            --exclude "*.pyc" \
+            --exclude "__pycache__/*"
+          az functionapp deployment source config-zip \
+            --name ats-resume-extractor \
+            --resource-group ats-system-rg \
+            --src deploy.zip
+
+      - name: Restart Function App
+        run: |
+          az functionapp restart \
+            --name ats-resume-extractor \
+            --resource-group ats-system-rg
+          echo "✅ Deployed successfully!"

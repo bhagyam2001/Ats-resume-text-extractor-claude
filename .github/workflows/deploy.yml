@@ -45,32 +45,40 @@ jobs:
             --settings WEBSITE_RUN_FROM_PACKAGE=0 \
             SCM_DO_BUILD_DURING_DEPLOYMENT=false
 
-      - name: Zip and deploy
+      - name: Zip and deploy via blob storage
         run: |
           zip -r deploy.zip . \
             --exclude "*.git*" \
             --exclude "*.pyc" \
             --exclude "__pycache__/*"
-          
-          # Get publishing credentials
-          CREDS=$(az functionapp deployment list-publishing-credentials \
+
+          az storage blob upload \
+            --account-name atsresumestorage \
+            --container-name deploy \
+            --name deploy.zip \
+            --file deploy.zip \
+            --overwrite \
+            --auth-mode login
+
+          EXPIRY=$(date -u -d '+1 year' '+%Y-%m-%dT%H:%MZ')
+          SAS_URL=$(az storage blob generate-sas \
+            --account-name atsresumestorage \
+            --container-name deploy \
+            --name deploy.zip \
+            --permissions r \
+            --expiry $EXPIRY \
+            --auth-mode login \
+            --full-uri \
+            --output tsv)
+
+          az functionapp config appsettings set \
             --name ats-resume-extractor \
             --resource-group ats-system-rg \
-            --query '{u:publishingUserName,p:publishingPassword}' \
-            -o json)
-          
-          PUB_USER=$(echo $CREDS | python3 -c "import sys,json; print(json.load(sys.stdin)['u'])")
-          PUB_PASS=$(echo $CREDS | python3 -c "import sys,json; print(json.load(sys.stdin)['p'])")
-          
-          # Deploy via Kudu zip API
-          curl -X POST \
-            "https://ats-resume-extractor.scm.azurewebsites.net/api/zipdeploy?isAsync=false" \
-            -u "$PUB_USER:$PUB_PASS" \
-            -H "Content-Type: application/zip" \
-            --data-binary @deploy.zip \
-            --max-time 300 \
-            -w "\nHTTP Status: %{http_code}\n"
+            --settings WEBSITE_RUN_FROM_PACKAGE="$SAS_URL"
 
+          az functionapp restart \
+            --name ats-resume-extractor \
+            --resource-group ats-system-rg
       - name: Restart Function App
         run: |
           az functionapp restart \

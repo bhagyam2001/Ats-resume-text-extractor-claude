@@ -1,39 +1,42 @@
-name: Build and deploy Python Function App
+name: Deploy Azure Function App
 
 on:
-  push:
-    branches:
-      - main
+push:
+branches:
+- main
 
 env:
-  AZURE_FUNCTIONAPP_NAME: ats-resume-extractor
-  PYTHON_VERSION: '3.11'
+AZURE_FUNCTIONAPP_NAME: your-function-app-name
+AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
+PYTHON_VERSION: '3.10'
 
 jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
+build-and-deploy:
+runs-on: ubuntu-latest
 
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+```
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
 
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+  - name: Set up Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt --target=".python_packages/lib/site-packages"
+  - name: Install dependencies
+    run: |
+      python -m pip install --upgrade pip
+      pip install -r requirements.txt
 
-    - name: Login to Azure
-      uses: azure/login@v1
-      with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
+  - name: Zip artifact for deployment
+    run: |
+      zip -r release.zip .
 
-    - name: Deploy
-      uses: Azure/functions-action@v1
-      with:
-        app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-        package: '.'
+  - name: Deploy to Azure Function
+    uses: Azure/functions-action@v1
+    with:
+      app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+      package: release.zip
+      publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+```

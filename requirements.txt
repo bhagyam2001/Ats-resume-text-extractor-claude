@@ -5,3 +5,4 @@ docx2txt==0.8
 requests==2.32.3
 pytesseract==0.3.10
 Pillow==10.4.0
+cryptography==41.0.7

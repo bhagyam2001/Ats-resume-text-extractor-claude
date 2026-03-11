@@ -12,7 +12,7 @@ import pdfplumber
 import docx2txt
 
 # ═══════════════════════════════════════════════════════════════════
-# ENTERPRISE ATS RESUME EXTRACTOR  —  v7.0
+# ENTERPRISE ATS RESUME EXTRACTOR  —  v7.0 #SV
 # ═══════════════════════════════════════════════════════════════════
 # Fixes in v7 vs v6:
 #   1. Robust section detection — handles ALL CAPS, Title Case,
@@ -354,6 +354,10 @@ SECTION_PATTERNS = {
 # Regex patterns
 EMAIL_PAT    = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 PHONE_PAT    = re.compile(r"(?:\+?\d[\d\s\-().]{7,17}\d)")
+PHONE_LABEL  = re.compile(
+    r"(?:mobile|phone|cell|contact|tel|ph)[^\n:]*:\s*([\+\d][\d\s\-().]{6,17}\d)",
+    re.IGNORECASE
+)
 LINKEDIN_PAT = re.compile(r"linkedin\.com/in/[\w\-]+", re.IGNORECASE)
 GITHUB_PAT   = re.compile(r"github\.com/[\w\-]+", re.IGNORECASE)
 URL_PAT      = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -559,15 +563,50 @@ def extract_doc_legacy(file_bytes: bytes) -> dict:
             return {"text": text, "page_count": None, "ocr_used": False}
 
 
+# OLE / Office XML metadata markers — content after these is not resume text
+_OLE_METADATA_MARKERS = re.compile(
+    r"(?:theme[/\\]theme|\[Content_Types\]\.xml|MSIP_Label_[0-9a-f\-]{30,}|"
+    r"Google\.Documents\.|Microsoft\s+Word\s+97|Sample\s+SFIA|"
+    r"\.rels\b|docProps/|ppt/|xl/|word/_rels)",
+    re.IGNORECASE
+)
+
+# Lines that are clearly OLE/XML metadata and not resume content
+_OLE_LINE_PATTERN = re.compile(
+    r"^(?:theme/|\[Content_Types\]|MSIP_Label|Google\.Documents|"
+    r"Microsoft\s+(?:Word|Office)|Sample\s+SFIA|docProps|"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-|PK[\x03\x04])",
+    re.IGNORECASE
+)
+
+
 def _extract_doc_raw(file_bytes: bytes) -> str:
-    """Last-resort: extract printable ASCII strings from .doc binary."""
+    """
+    Last-resort text extraction from legacy .doc binary.
+    Strips OLE compound document metadata (theme XML, MSIP sensitivity
+    labels, Google Docs revision IDs, [Content_Types].xml etc.)
+    that bleeds into the raw binary text after the actual resume content.
+    """
     try:
-        text = file_bytes.decode("latin-1", errors="ignore")
-        # Keep runs of printable characters
+        text   = file_bytes.decode("latin-1", errors="ignore")
         chunks = re.findall(r"[ -~\n\t]{20,}", text)
-        # Filter out binary-looking chunks
-        clean  = [c for c in chunks if sum(1 for ch in c if ch.isalpha()) > len(c) * 0.4]
-        return "\n".join(clean)
+        clean  = [c for c in chunks
+                  if sum(1 for ch in c if ch.isalpha()) > len(c) * 0.4]
+        joined = "\n".join(clean)
+
+        # Find the first OLE metadata marker and truncate there
+        meta_m = _OLE_METADATA_MARKERS.search(joined)
+        if meta_m:
+            joined = joined[:meta_m.start()].rstrip()
+
+        # Also filter line-by-line for any stray metadata lines
+        lines = []
+        for line in joined.split("\n"):
+            if _OLE_LINE_PATTERN.match(line.strip()):
+                break   # stop at first metadata line
+            lines.append(line)
+
+        return "\n".join(lines)
     except Exception:
         return ""
 
@@ -751,11 +790,20 @@ def extract_contact(text: str) -> dict:
     if m:
         contact["email"] = m.group().strip()
 
-    for m in PHONE_PAT.finditer(text):
-        digits = re.sub(r"\D", "", m.group())
+    # Try labelled phone first ("Mobile No: +91-...")
+    m_label = PHONE_LABEL.search(text[:800])
+    if m_label:
+        digits = re.sub(r"\D", "", m_label.group(1))
         if 7 <= len(digits) <= 15:
-            contact["phone"] = m.group().strip()
-            break
+            contact["phone"] = m_label.group(1).strip()
+
+    # Fallback: bare number pattern
+    if not contact["phone"]:
+        for m in PHONE_PAT.finditer(text[:800]):
+            digits = re.sub(r"\D", "", m.group())
+            if 7 <= len(digits) <= 15:
+                contact["phone"] = m.group().strip()
+                break
 
     m = LINKEDIN_PAT.search(text)
     if m:
@@ -885,28 +933,82 @@ def _conf_title(title) -> str:
 # ───────────────────────────────────────────────────────────────────
 # LOCATION
 # ───────────────────────────────────────────────────────────────────
+# Known real cities/countries — only these are accepted as locations
+KNOWN_LOCATIONS = {
+    # India — cities
+    "chennai", "mumbai", "delhi", "new delhi", "bangalore", "bengaluru",
+    "hyderabad", "pune", "kolkata", "ahmedabad", "jaipur", "surat",
+    "lucknow", "nagpur", "visakhapatnam", "vizag", "coimbatore", "madurai",
+    "noida", "gurugram", "gurgaon", "faridabad", "ghaziabad", "navi mumbai",
+    "thane", "vadodara", "indore", "bhopal", "patna", "chandigarh",
+    "kochi", "thiruvananthapuram", "mysuru", "mysore", "hubli",
+    # India — states / regions
+    "india", "tamil nadu", "maharashtra", "karnataka", "telangana",
+    "andhra pradesh", "kerala", "gujarat", "rajasthan", "uttar pradesh",
+    "madhya pradesh", "west bengal", "odisha", "bihar", "haryana", "punjab",
+    # Global cities
+    "london", "new york", "new york city", "los angeles", "chicago",
+    "san francisco", "seattle", "boston", "austin", "dallas", "atlanta",
+    "singapore", "dubai", "abu dhabi", "riyadh", "doha",
+    "toronto", "vancouver", "montreal", "ottawa",
+    "sydney", "melbourne", "brisbane", "perth",
+    "berlin", "munich", "frankfurt", "hamburg",
+    "paris", "lyon", "marseille",
+    "amsterdam", "rotterdam", "the hague",
+    "zurich", "geneva", "bern",
+    "stockholm", "oslo", "copenhagen",
+    "tokyo", "osaka", "kuala lumpur", "jakarta",
+    "hong kong", "shanghai", "beijing", "shenzhen",
+    "dubai", "doha", "manama",
+    # Global countries / regions
+    "united kingdom", "united states", "australia", "canada", "germany",
+    "france", "netherlands", "switzerland", "sweden", "norway", "denmark",
+    "singapore", "malaysia", "japan", "china", "uae", "uk", "usa", "us",
+    "remote", "hybrid",
+}
+
+
 def extract_location(text: str) -> str:
-    # Pattern: "City, Country" or "City, ST" — but NOT content phrases
-    patterns = [
-        re.compile(
-            r"\b([A-Z][a-z]+(?:[\s\-][A-Z][a-z]+)?,\s*"
-            r"(?:[A-Z]{2,3}|[A-Z][a-z]+(?:\s[A-Z][a-z]+)?))\b"
-        ),
-        re.compile(
-            r"(?:location|based in|residing in|address)[:\s]+([^\n,]{3,50})",
-            re.IGNORECASE
-        ),
-    ]
-    sample = text[:800]
-    for pat in patterns:
-        m = pat.search(sample)
-        if m:
-            candidate = m.group(1).strip()
-            # Reject if it looks like a skill phrase
-            bad = ["process","configuration","development","management",
-                   "solution","implementation","design","architect"]
-            if not any(b in candidate.lower() for b in bad):
-                return candidate
+    """
+    Extract location from resume header.
+    Strategy:
+    1. Explicit label match ("Location: Chennai, India") — highest confidence
+    2. Positive known-location match from "City, Region" pattern
+    3. Reject everything else — better to return None than a false positive
+    """
+    # Only scan the very top of the document (header only)
+    sample = text[:500]
+
+    # ── Strategy 1: Explicit location label ──────────────────────
+    label_pat = re.compile(
+        r"(?:location|address|based\s+in|residing\s+in|city)[:\s]+([^\n]{3,60})",
+        re.IGNORECASE
+    )
+    m = label_pat.search(sample)
+    if m:
+        return m.group(1).strip().rstrip(".,;")
+
+    # ── Strategy 2: "City, Country" pattern + known location check ──
+    city_pat = re.compile(
+        r"\b([A-Z][a-z]+(?:[\s\-][A-Z][a-z]+)?,\s*"
+        r"(?:[A-Z]{2,3}|[A-Z][a-z]+(?:\s[A-Z][a-z]+)?))\b"
+    )
+    for m in city_pat.finditer(sample):
+        candidate = m.group(1).strip().rstrip(".,;")
+        # Reject if candidate spans multiple lines (not a real location)
+        if "\n" in candidate:
+            continue
+        # ONLY accept if the candidate contains a known location word
+        candidate_lower = candidate.lower()
+        if any(loc in candidate_lower for loc in KNOWN_LOCATIONS):
+            return candidate
+
+    # ── Strategy 3: Bare known city name on its own line ─────────
+    for line in sample.split("\n"):
+        line_clean = line.strip().rstrip(".,;").lower()
+        if line_clean in KNOWN_LOCATIONS and 3 <= len(line_clean) <= 30:
+            return line.strip().rstrip(".,;")
+
     return None
 
 
@@ -1017,15 +1119,17 @@ def extract_skills(skills_section: str, full_text: str) -> dict:
     # Also parse items directly listed in skills section
     if skills_section:
         for raw in re.split(r"[,|•·\n\t/\\]+", skills_section):
-            s = re.sub(r"^[-•·*▪▸✓✔\s]+", "", raw).strip()
+            s = re.sub(r"^[-•·*▪▸o✓✔\s]+", "", raw).strip()
             s = re.sub(r"\s+", " ", s).strip()
+            # ── Strip trailing punctuation ──────────────────────────
+            s = re.sub(r"[.,;:!?]+$", "", s).strip()
             if 2 <= len(s) <= 60 and len(s.split()) <= 5:
                 if s not in found and not any(
                     stop in s.lower() for stop in
                     ["year","month","responsi","worked","developed","managed",
                      "experience","knowledge of","\\(","till date","to date",
                      "2020","2021","2022","2023","2024","2025","2026"]
-                ) and not re.match(r"^[\d\s\-/]+$", s):  # exclude pure date strings
+                ) and not re.match(r"^[\d\s\-/]+$", s):
                     by_cat.setdefault("other", []).append(s)
                     found.add(s)
 
@@ -1220,7 +1324,14 @@ HEADER_BLOCKLIST = re.compile(
     r"team\s+size|duration|client|role|organisation|organization|"
     r"involved\s+in|responsible\s+for|developed|created|designed|"
     r"configured|participated|conducted|collaborated|maintained|"
-    r"have\s+exposure|written|worked|utilized|understanding)\b",
+    r"have\s+exposure|written|worked|utilized|understanding|"
+    r"professional\s+summary|personal\s+(?:details?|information)|"
+    r"email\s+(?:id|address)?|mobile\s+(?:no\.?|number)?|"
+    r"contact\s+(?:details?|information)|address|"
+    r"i\s+hereby\s+declare|declaration|"
+    r"technical\s+(?:skills?|expertise)|career\s+(?:skills?|objective)|"
+    r"work\s+history|employment\s+history|experience|education|"
+    r"certif|language|award|achievement|reference|project\s+#?\d+)\b",
     re.IGNORECASE
 )
 
@@ -1447,16 +1558,32 @@ def _extract_bullets(lines: list) -> list:
     return bullets
 
 
+# Single-char or noise tokens that should never appear as technologies
+_TECH_BLOCKLIST = {"c", "r", "a", "b", "d", "e", "f", "g", "i", "j", "k",
+                   "m", "n", "o", "p", "q", "s", "t", "u", "v", "w", "x", "y", "z",
+                   "bi", "it", "ui", "qa", "hr", "er", "or", "id", "ai"}
+
+
 def _extract_technologies(text: str) -> list:
-    """Extract recognised technology/skill names from free text."""
+    """
+    Extract recognised technology/skill names from free text.
+    Skips soft skills, spoken languages, and single-char noise tokens.
+    Strips trailing punctuation from display names.
+    """
     found = []
     lower = text.lower()
     for skill, cat in ALL_SKILLS:
         if cat in ("soft_skills", "spoken_languages"):
             continue
+        # Skip single-char or blocklisted noise
+        if skill.strip() in _TECH_BLOCKLIST:
+            continue
         if re.search(r"\b" + re.escape(skill) + r"\b", lower):
+            # Build display name: title-case for longer skills, upper for short
             display = skill.title() if len(skill) > 2 else skill.upper()
-            if display not in found:
+            # Strip any trailing punctuation artifacts
+            display = re.sub(r"[.,;:!?]+$", "", display).strip()
+            if display and display not in found:
                 found.append(display)
     return sorted(found)
 
@@ -1569,26 +1696,50 @@ def _parse_dates(block: str) -> dict:
 
 def calc_total_exp(jobs: list) -> float:
     """
-    Calculate non-overlapping total experience years from job list.
-    Reads both _start/_end (internal) and duration string as fallback.
+    Calculate total non-overlapping experience years from job list.
+
+    Strategy:
+    1. For each employer, try to get a date interval:
+       a. From _start/_end fields (set by _parse_employer_block)
+       b. From parsing the duration string
+    2. Merge overlapping intervals → date-range total
+    3. For employers with NO parseable dates, use their stated years
+       as additional experience (avoids double-counting by only adding
+       years beyond the date-range span already counted)
+    4. Last resort: if no intervals at all, sum raw years
     """
-    cur_year = datetime.datetime.now().year
-    ranges   = []
+    cur_year   = datetime.datetime.now().year
+    ranges     = []
+    undated_yrs = []  # years from employers with no date interval
+
     for job in jobs:
-        s = job.get("_start") or job.get("years") and None
+        s = job.get("_start")
         e = job.get("_end")
-        # Fallback: try parsing duration string
+
+        # Try parsing duration string if no dates set
         if (not s or not e) and job.get("duration"):
             d = _parse_date_range(str(job["duration"]))
             s = d.get("_start")
             e = d.get("_end")
+
         if s and e and isinstance(s, int) and isinstance(e, int):
-            if 1950 <= s <= cur_year and s <= e <= cur_year + 1:
+            if 1950 <= s <= cur_year + 1 and s <= e <= cur_year + 1:
                 ranges.append((s, e))
+                continue  # counted via interval
+
+        # No date interval — collect raw years
+        yrs = job.get("years")
+        if yrs is not None and float(yrs) > 0:
+            undated_yrs.append(float(yrs))
+
+    if not ranges and not undated_yrs:
+        return 0
+
     if not ranges:
-        # Last resort: sum the "years" field
-        total = sum(float(j.get("years") or 0) for j in jobs if j.get("years"))
-        return round(min(total, 50), 1)
+        # No date intervals at all — just sum raw years
+        return round(min(sum(undated_yrs), 50), 1)
+
+    # Merge overlapping date intervals
     ranges.sort()
     merged = [list(ranges[0])]
     for s, e in ranges[1:]:
@@ -1596,7 +1747,15 @@ def calc_total_exp(jobs: list) -> float:
             merged[-1][1] = max(merged[-1][1], e)
         else:
             merged.append([s, e])
-    return round(min(sum(e - s for s, e in merged), 50), 1)
+
+    dated_total    = sum(e - s for s, e in merged)
+    dated_span     = max(e for _, e in merged) - min(s for s, _ in merged)
+
+    # Add undated employers' years that exceed what's already in the date span
+    # e.g. Caliber 1yr (dated) + Cognizant 3yr (undated) → max(0, 3-1)=2 extra → 3 total
+    extra = max(0.0, sum(undated_yrs) - dated_span)
+    total = round(min(dated_total + extra, 50), 1)
+    return total
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -1775,7 +1934,8 @@ def structure_resume(raw_text: str) -> dict:
     edu      = extract_education(edu_src)
     certs    = extract_certs(cert_s)
     langs    = extract_languages(lang_s)
-    location = extract_location(header + "\n" + cleaned[:800])
+    # Only scan header area — large windows cause false location matches
+    location = extract_location(header + "\n" + cleaned[:200])
     total_exp= calc_total_exp(jobs)
 
     # Clean internal date fields

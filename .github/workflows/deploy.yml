@@ -6,9 +6,8 @@ branches:
 - main
 
 env:
-AZURE_FUNCTIONAPP_NAME: your-function-app-name
-AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
-PYTHON_VERSION: '3.10'
+AZURE_FUNCTIONAPP_NAME: ats-resume-extractor
+PYTHON_VERSION: '3.11'
 
 jobs:
 build-and-deploy:

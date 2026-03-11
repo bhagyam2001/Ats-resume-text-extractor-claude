@@ -398,40 +398,126 @@ JOB_TITLE_KEYWORDS = [
 # PDF EXTRACTION  —  column-aware + OCR fallback
 # ───────────────────────────────────────────────────────────────────
 def extract_pdf(file_bytes: bytes) -> dict:
+    """
+    Smart PDF extraction with three strategies per page:
+
+    Strategy A — Table extraction (highest priority)
+      If the page has pdfplumber-detected tables, extract them as
+      pipe-separated rows (matches our DOCX table format) so the
+      experience parser can read "Duration | Organization | Designation"
+      rows correctly.
+
+    Strategy B — Dynamic column detection
+      Detect two-column layouts by finding the largest horizontal gap
+      between word clusters, then crop left and right independently.
+      This avoids the fixed-midpoint bug that truncated HariHaraSuthan's
+      lines ("ALTECH STAR SOL" instead of "ALTECH STAR SOLUTIONS").
+
+    Strategy C — OCR fallback
+      For scanned / image-based pages with no extractable text.
+    """
     pages_text = []
     ocr_used   = False
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         page_count = len(pdf.pages)
+
         for i, page in enumerate(pdf.pages):
-            words = page.extract_words()
             page_text = ""
 
-            if words:
-                midpoint   = page.width / 2
-                left_words = [w for w in words if w["x0"] < midpoint - 20]
-                right_words= [w for w in words if w["x0"] > midpoint + 20]
-                left_ratio = len(left_words) / len(words)
-                right_ratio= len(right_words) / len(words)
+            # ── Strategy A: table extraction ─────────────────────────
+            tables = page.extract_tables()
+            table_texts = []
+            for table in tables:
+                for row in table:
+                    cells = [str(c).strip() if c else "" for c in row]
+                    cells = [c for c in cells if c]
+                    if cells:
+                        table_texts.append("  |  ".join(cells))
 
-                if left_ratio > 0.2 and right_ratio > 0.2:
-                    left_text  = (page.crop((0, 0, midpoint, page.height)).extract_text() or "")
-                    right_text = (page.crop((midpoint, 0, page.width, page.height)).extract_text() or "")
-                    page_text  = left_text.strip() + "\n\n" + right_text.strip()
-                else:
-                    page_text  = page.extract_text() or ""
+            # Get non-table text (body paragraphs)
+            # Mask table bounding boxes so we only get prose text
+            if page.find_tables():
+                try:
+                    body_text = page.extract_text(
+                        layout=True,
+                        x_tolerance=3,
+                        y_tolerance=3
+                    ) or ""
+                except Exception:
+                    body_text = page.extract_text() or ""
+            else:
+                body_text = ""
 
+            if table_texts:
+                # Combine prose and table rows
+                page_text = body_text.strip()
+                if table_texts:
+                    page_text = page_text + "\n" + "\n".join(table_texts)
+
+            # ── Strategy B: column-aware extraction ───────────────────
+            if not page_text.strip():
+                words = page.extract_words(
+                    x_tolerance=3, y_tolerance=3,
+                    keep_blank_chars=False
+                )
+                if words:
+                    # Find the dynamic column split point
+                    # Sort unique x-positions, find the biggest gap
+                    x_positions = sorted({round(w["x0"]) for w in words})
+                    split_x     = None
+
+                    if len(x_positions) > 4:
+                        gaps = [
+                            (x_positions[j+1] - x_positions[j], x_positions[j])
+                            for j in range(len(x_positions) - 1)
+                        ]
+                        max_gap, gap_at = max(gaps)
+                        page_mid = page.width / 2
+
+                        # Only treat as two-column if the gap is significant
+                        # (> 40px) AND near the centre (25%–75% of page width)
+                        if (max_gap > 40
+                                and page.width * 0.25 < gap_at < page.width * 0.75):
+                            split_x = gap_at + max_gap / 2
+
+                    if split_x:
+                        left_text  = page.crop(
+                            (0, 0, split_x, page.height)
+                        ).extract_text(layout=True) or ""
+                        right_text = page.crop(
+                            (split_x, 0, page.width, page.height)
+                        ).extract_text(layout=True) or ""
+                        page_text = left_text.strip() + "\n\n" + right_text.strip()
+                    else:
+                        page_text = page.extract_text(layout=True) or ""
+
+            # ── Strategy C: OCR fallback ──────────────────────────────
             if not page_text.strip():
                 try:
                     img_bytes = io.BytesIO()
-                    page.to_image(resolution=200).original.save(img_bytes, format="PNG")
+                    page.to_image(resolution=300).original.save(img_bytes, format="PNG")
                     page_text = _ocr(img_bytes.getvalue())
                     if page_text.strip():
                         ocr_used = True
                 except Exception as e:
                     logging.warning(f"OCR fallback page {i+1}: {e}")
 
-            pages_text.append(page_text)
+            # ── Clean truncated line fragments ─────────────────────────
+            # PDF column layouts sometimes produce cut-off lines like
+            # "ALTECH STAR SOL" — flag them but keep them so raw_sections
+            # still has context. The structured parser will skip them.
+            cleaned_lines = []
+            for line in page_text.split("\n"):
+                stripped = line.strip()
+                # Keep lines that are long enough to be meaningful
+                # or are known structural markers (dates, headers, pipe-tables)
+                if (len(stripped) >= 3
+                        or "|" in stripped
+                        or re.match(r"^(page|\d)", stripped, re.IGNORECASE)):
+                    cleaned_lines.append(line)
+
+            pages_text.append("\n".join(cleaned_lines))
 
     return {
         "text":       "\n\n".join(pages_text).strip(),
